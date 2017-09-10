@@ -1,5 +1,6 @@
 function execute() {
   try {
+    nlapiLogExecution('DEBUG', 'Starting the Capture', '')
     var searchId = nlapiGetContext().getSetting('SCRIPT', 'custscript_so_payment_capture')
     var fieldsMap = nlapiGetContext().getSetting('SCRIPT', 'custscript_fields_map') // { 'internalid': 'internalid', 'authcode': 'authcode', 'amount': 'custbody_amount_to_capture', 'note': 'custbody_note', 'is_final_capture': 'custbody_is_final_capture' }
     var creds = nlapiGetContext().getSetting('SCRIPT', 'custscript_credentials')
@@ -19,21 +20,33 @@ function execute() {
     }
     var search = nlapiLoadSearch('salesorder', searchId)
     var resultSet = search.runSearch()
-    var i=0
+    var i = 0
+    var flag = false
     resultSet.forEachResult(function (searchResult) {
-      if (i>2) {
-        // return true
+      if (flag) {
+        return true
       }
+      // nlapiLogExecution('DEBUG', 'i', i)
       var fieldValueMap = {}
       for (var f in fieldsMap) {
         if (fieldsMap.hasOwnProperty(f)) {
           var field = fieldsMap[f]
           fieldValueMap[f] = searchResult.getValue(field)
-          nlapiLogExecution('DEBUG', 'field and value', field + ' : ' + fieldValueMap[f])
+          // nlapiLogExecution('DEBUG', 'field and value', field + ' : ' + fieldValueMap[f])
         }
       }
       try {
-        sendRequest(fieldValueMap, [creds.username, creds.password])
+        // if (updateCaptureAmount(fieldValueMap)) {
+        var transR = updateCaptureAmount(fieldValueMap)
+        var res = sendRequest(fieldValueMap, [creds.username, creds.password])
+        res = JSON.parse(res)
+        if (res.transactionId) {
+          createBill(fieldValueMap, transR)
+          // flag = true
+        } else {
+          nlapiLogExecution('ERROR', 'Error capturing payment', JSON.stringify(res))
+        }
+        // }
       } catch (e) {
         nlapiLogExecution('DEBUG', 'SendRequest exception', e)
       }
@@ -43,11 +56,64 @@ function execute() {
   } catch (e) {
     nlapiLogExecution('ERROR', 'Error capturing payment', e)
   }
+  nlapiLogExecution('DEBUG', 'End of Capture', '')
+}
+
+function updateCaptureAmount(fieldValueMap) {
+  try {
+    // var record = nlapiLoadRecord('salesorder', fieldValueMap.orderid)
+    // var lc = record.getLineItemCount('item')
+    // nlapiLogExecution('DEBUG', 'order and total lines', 'Order #' + fieldValueMap.orderid + 'Line count: ' + lc)
+    // var amount = 0
+    // for (var i = 1; i <= lc; i++) {
+    //   var isF = record.getLineItemValue('item', 'quantityfulfilled', i) || '0'
+    //   var isB = record.getLineItemValue('item', 'quantitybilled', i) || '0'
+    //   if (isF === '1' && isB === '0') {
+    //     nlapiLogExecution('DEBUG', 'amount', record.getLineItemValue('item', 'amount', i))
+    //     amount = parseFloat(amount) + parseFloat(record.getLineItemValue('item', 'amount', i) || '0.00')
+    //   }
+    // }
+    // fieldValueMap.amount = amount
+    // // fieldValueMap.amount = 1.00
+    // var f = fieldValueMap.amount > 0
+    // // nlapiLogExecution('DEBUG', 'Is amount > 0', f)
+    // return f
+
+    var rec = nlapiTransformRecord('salesorder', fieldValueMap.orderid, 'cashsale')
+    fieldValueMap.amount = rec.getFieldValue('total') || '0.00'
+    nlapiLogExecution('DEBUG', 'Amount to Capture for Sales order #' + fieldValueMap.orderid, fieldValueMap.amount)
+    return rec
+  } catch (e) {
+    nlapiLogExecution('ERROR', 'error updating capture amount', e)
+    return false
+  }
+}
+
+function createBill(fieldValueMap, rec) {
+  try {
+    nlapiLogExecution('DEBUG', 'Creating Bill', fieldValueMap.orderid)
+    // var rec = nlapiTransformRecord('salesorder', fieldValueMap.orderid, 'cashsale')
+    if (!rec.getFieldValue('ccnumber')) {
+      if (rec.getFieldValue('paymentmethod') === '5') {
+        rec.setFieldValue('ccnumber', '4242424242424242')
+      } else if (rec.getFieldValue('paymentmethod') === '4') {
+        rec.setFieldValue('ccnumber', '5404000000000001')
+      }
+    }
+    rec.setFieldValue('ccexpiredate', '01/2030')
+    rec.setFieldValue('ccapproved', 'T')
+    // nlapiLogExecution('DEBUG', 'Expiration Date', rec.getFieldValue())
+    var recId = nlapiSubmitRecord(rec, true)
+    nlapiLogExecution('DEBUG', 'Cashsale created for Sales order #' + fieldValueMap.orderid, recId)
+    return recId
+  } catch (e) {
+    nlapiLogExecution('ERROR', 'Failed to create CashSale', e)
+  }
 }
 
 function sendRequest(fieldsMap, creds) {
   try {
-    nlapiLogExecution('DEBUG', 'Credentials', JSON.stringify(creds))
+    // nlapiLogExecution('DEBUG', 'Credentials', JSON.stringify(creds))
     var endPoint = nlapiGetContext().getSetting('SCRIPT', 'custscript_endpoint') // '/api/v1/payment/{orderId}/authorization/{authorizationId}/capture'
     if (!endPoint) {
       nlapiLogExecution('ERROR', 'endPoint is mandatory', '')
@@ -79,8 +145,9 @@ function sendRequest(fieldsMap, creds) {
     var res = nlapiRequestURLWithCredentials(creds, cUri, headers)
     // var res1 = nlapiRequestURLWithCredentials(creds,'https://test-cartapi.ylighting.com/api/v1/payment/712125/authorization/82921352348550764/capture',{'amount':2,'note':"test",'is_final_capture':false})
     // seen an exception on covernting res as JSON.stringify. Need to get the body of the response and convet to JSON
-    var resBody = JSON.stringify(res.body)
-    nlapiLogExecution('DEBUG', 'Capture response', resBody)
+    // var resBody = res.body
+    nlapiLogExecution('DEBUG', 'Capture response', res.body)
+    return res.body
   } catch (e) {
     throw e
   }
@@ -122,3 +189,23 @@ function sendRequest(fieldsMap, creds) {
       throw e
     } */
 }
+
+
+// {
+// 	'transactionId': '82921414287852773',
+// 	'data': {
+// 		'litleTxnId': '82921414287852773',
+// 		'response': '000',
+// 		'responseTime': '2017-09-10T07:55:03',
+// 		'postDate': '2017-09-10',
+// 		'message': 'Approved',
+// 		'@attributes': {
+// 			'id': '59b4efd64cb343.76014286',
+// 			'reportGroup': 'Default Report Group'
+// 		},
+// 		'RESULT': 0,
+// 		'PNREF': '82921414287852773',
+// 		'RESPMSG': 'Approved',
+// 		'TRANSTIME': '2017-09-10T07:55:03'
+// 	}
+// }
